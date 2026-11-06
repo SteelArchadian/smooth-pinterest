@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  body { font: 13px system-ui, sans-serif; width: 280px; margin: 12px; }
+  h1 { font-size: 14px; margin: 0 0 6px; }
+  button { margin: 6px 6px 0 0; padding: 5px 10px; }
+  #status { margin-top: 8px; }
+  label { display: block; margin-top: 6px; }
+</style>
+<h1>Smooth Pinterest</h1>
+<div>A / W = previous &nbsp; D / S = next &nbsp; arrows too</div>
+<div style="margin-top:8px">Version <span id="ver"></span></div>
+<label><input type="checkbox" id="viewer"> Fast viewer</label>
+<label><input type="checkbox" id="related"> Grid below shows related pins of the current picture</label>
+<label><input type="checkbox" id="auto"> Update automatically</label>
+<button id="check">Check for updates</button>
+<button id="diag">Copy diagnostics</button>
+<button id="install" hidden>Update now</button>
+<div id="status"></div>
+<a id="notes" href="#" hidden>Release notes</a>
+<script src="popup.js"></script>

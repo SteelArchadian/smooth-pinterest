@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "Smooth Pinterest",
+  "version": "1.0.0",
+  "description": "Brings back keyboard slideshow navigation on Pinterest: A/D, W/S or the arrow keys move between pins.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsG2E21rFABLZxMZyDBYdUAU0CtKEzJGNf6Aq6oQah58CqpBnlY6Vi+GR02n+csnDISGy9goJQ8kx51ZlRtn9MaVhIY326j2iUu05BRxRkiMLZLpWpXj1pH0Ns14sD8XPxbf2YSS6CPmXNayOC7psjw9/G0ASGtD6t3Q1Jb6Jm4lA5T208SqnLFRw0eeDNjuPB/dj7w3E6MtBGHWrWdQtyWAgGBGAQpt29kFwGEQLYPkCcwE5ibnO9QU2uv1uc2f417ghKjzyXRh+e5PbakcR+2cdu5n7vrOrkzq8H+BEhVQ2mlMrJSWYba+iqnlnmRe1vn3pj64NxfBVflGw6h/bhwIDAQAB",
+  "permissions": [
+    "alarms",
+    "storage",
+    "nativeMessaging"
+  ],
+  "host_permissions": [
+    "https://api.github.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Smooth Pinterest"
+  },
+  "icons": {
+    "128": "icon.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.pinterest.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "*://*.pinterest.com/*"
+      ],
+      "js": [
+        "page.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ]
+}
