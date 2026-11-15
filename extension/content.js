@@ -106,6 +106,16 @@
   let Z = { z: 1, x: 0, y: 0 };
   const relCache = new Map(), vidCache = new Map();
 
+  // Promoted pins: the card says "Promoted by" / "Sponsored" or is marked in its markup.
+  const AD_RE = /promoted|sponsored/i;
+  function isAd(a) {
+    const card = a.closest('[data-grid-item], [data-test-id="pin"], [data-test-id="pinWrapper"]') || a.parentElement;
+    if (!card) return false;
+    if (AD_RE.test(a.getAttribute('aria-label') || '')) return true;
+    if (card.querySelector('[data-test-id*="romoted" i], [data-test-id*="ponsored" i], [aria-label*="romoted" i], [aria-label*="ponsored" i]')) return true;
+    return AD_RE.test((card.innerText || card.textContent || '').slice(0, 400));
+  }
+
   function itemsFromPage() {
     const out = [];
     const seen = new Set();
@@ -115,6 +125,7 @@
       const img = a.querySelector('img');
       const r = a.getBoundingClientRect();
       if (!img || !(img.currentSrc || img.src) || r.width <= 0 || r.height <= 0) continue;
+      if (isAd(a)) continue;
       seen.add(id);
       out.push({ id, src: img.currentSrc || img.src, alt: img.alt || '', w: img.naturalWidth, h: img.naturalHeight, video: !!a.querySelector('video') || /(^|\s)\d{1,2}:\d{2}(\s|$)/.test(a.textContent || '') });
     }
@@ -158,6 +169,17 @@
     gridCols = []; gridH = []; gridN = 0;
     for (let c = 0; c < n; c++) { const d = document.createElement('div'); d.className = 'col'; grid.appendChild(d); gridCols.push(d); gridH.push(0); }
   }
+  // Tiles load their picture well before they scroll into view, so fast scrolling never shows blanks.
+  let gIO = null, gIOov = null;
+  function gridIO() {
+    if (gIO && gIOov === ov) return gIO;
+    if (gIO) gIO.disconnect();
+    gIOov = ov;
+    gIO = new IntersectionObserver((es) => {
+      for (const e of es) if (e.isIntersecting) { const t = e.target; t.src = t.dataset.s; gIO.unobserve(t); }
+    }, { root: ov, rootMargin: '4000px 0px' });
+    return gIO;
+  }
   const gridList = () => gItems || vItems;
   function setGrid(list) { gItems = list; gridCols = []; gridN = 0; if (ov) syncGrid(); }
   function syncGrid() {
@@ -168,7 +190,8 @@
       const ratio = it.w && it.h ? it.h / it.w : 1.4;
       t.style.aspectRatio = '1 / ' + ratio;
       if (!(it.w && it.h)) t.onload = () => { t.style.aspectRatio = ''; };
-      t.src = it.src; t.alt = it.alt; t.dataset.k = k; t.draggable = false; t.loading = 'lazy';
+      t.alt = ''; t.dataset.k = k; t.draggable = false; t.decoding = 'async';
+      t.dataset.s = it.src; gridIO().observe(t);
       let c = 0;
       for (let i = 1; i < gridH.length; i++) if (gridH[i] < gridH[c]) c = i;
       gridH[c] += ratio + 0.05;
@@ -233,7 +256,7 @@
       o.onload = () => { if (im.isConnected) im.src = o.src; };
       o.src = big(vItems[vIndex].src, 'originals');
     }
-    if (dragPx === undefined) setLiked(false);
+    if (dragPx === undefined) { setLiked(false); setSaved(); }
     if (vItems.length - vIndex < 12) wantMore();
   }
 
@@ -302,6 +325,8 @@
   // ------------------------------------------------ related pins (grid mode)
   function findPins(x, out, seen, depth) {
     if (!x || typeof x !== 'object' || depth > 7) return out;
+    if (!Array.isArray(x) && (x.is_promoted || x.promoter || x.is_downstream_promotion || x.pin_promotion_id || x.advertiser_id || x.ad_destination_url || x.ad_data || x.promoted_is_removable)) return out;
+    if (!Array.isArray(x) && x.images && typeof x.images === 'object' && typeof x.id === 'string' && !/^\d+$/.test(x.id)) return out;
     if (!Array.isArray(x) && typeof x.id === 'string' && /^\d+$/.test(x.id) && x.images && typeof x.images === 'object') {
       const im = x.images['474x'] || x.images['236x'] || x.images['736x'] || Object.values(x.images)[0];
       if (im && im.url && !seen.has(x.id)) { seen.add(x.id); out.push({ id: x.id, src: im.url, alt: x.grid_title || x.title || '', w: im.width, h: im.height, video: !!x.videos }); }
@@ -312,17 +337,35 @@
   }
   async function relatedOf(id) {
     if (relCache.has(id)) return relCache.get(id);
-    const d = await replay('related', id);
-    const list = findPins(d, [], new Set([id]), 0);
+    const r = await replay('related', id);
+    const list = findPins(r.data, [], new Set([id]), 0);
     if (!list.length) throw new Error('no related pins in the answer');
+    list.bm = r.bm; list.more = false;
     relCache.set(id, list);
     return list;
+  }
+  // Next page of the related pins (Pinterest pages them with a bookmark).
+  let relBusy = false;
+  async function moreRelated() {
+    const l = gItems, id = vItems[vIndex].id;
+    if (!l || !relMode || relBusy || !l.bm || l.bm === '-end-' || l !== relCache.get(id)) return;
+    relBusy = true;
+    try {
+      const r = await replay('related', id, null, l.bm);
+      const seen = new Set(l.map((x) => x.id)); seen.add(id);
+      const add = findPins(r.data, [], seen, 0);
+      l.push(...add); l.bm = r.bm;
+      if (!add.length) l.bm = '-end-';
+      if (ov && gItems === l) syncGrid();
+    } catch (e) { note('related more failed ' + e.message); l.bm = '-end-'; }
+    relBusy = false;
+    if (l.bm !== '-end-' && l.length < 120 && gItems === l) moreRelated();
   }
   function scheduleRelated() {
     clearTimeout(relTimer);
     const id = vItems[vIndex].id;
     relTimer = setTimeout(() => {
-      relatedOf(id).then((l) => { if (ov && relMode && vItems[vIndex].id === id) setGrid(l); })
+      relatedOf(id).then((l) => { if (ov && relMode && vItems[vIndex].id === id) { setGrid(l); moreRelated(); } })
         .catch((e) => { note('related failed ' + e.message); toast('Related pins not available yet: open any pin page once so I can learn how Pinterest loads them.'); });
     }, 350);
   }
@@ -381,13 +424,14 @@
   }
 
   // Sends Pinterest's own recorded request again, for another pin / board.
-  async function replay(kind, newPin, boardId) {
+  async function replay(kind, newPin, boardId, bookmark) {
     const t = learn[kind];
     if (!t) throw new Error('not learned yet');
     const params = new URLSearchParams(t.r);
     const data = JSON.parse(params.get('data'));
     swapPin(data, t.pin, newPin);
     if (boardId && data.options) { if (data.options.data && typeof data.options.data === 'object') data.options.data.board_id = boardId; else data.options.board_id = boardId; }
+    if (bookmark && data.options) { data.options.bookmarks = [bookmark]; data.options.page_size = 50; }
     params.set('data', JSON.stringify(data));
     params.set('source_url', '/pin/' + newPin + '/');
     const headers = { 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': csrf(), 'X-Pinterest-AppState': 'active', 'X-Pinterest-Source-Url': '/pin/' + newPin + '/', 'X-Pinterest-PWS-Handler': 'www/pin/[id].js', Accept: 'application/json, text/javascript, */*, q=0.01' };
@@ -404,6 +448,7 @@
     const ok = res.ok && rr && (!rr.status || rr.status === 'success') && !rr.error;
     note('replay ' + kind + ' ' + res.status + (ok ? ' ok' : ' FAIL ' + text.slice(0, 160)));
     if (!ok) throw new Error(kind + ' ' + res.status);
+    if (kind === 'related') return { data: rr.data, bm: rr.bookmark || (json && json.resource && json.resource.options && json.resource.options.bookmarks && json.resource.options.bookmarks[0]) || '-end-' };
     return rr.data;
   }
 
@@ -420,13 +465,29 @@
     return null;
   }
 
+  function anyImg(x, d) {
+    if (!x || (d || 0) > 4) return '';
+    if (typeof x === 'string') return /pinimg\.com\/.+\.(jpe?g|png|webp)/i.test(x) ? x : '';
+    if (typeof x !== 'object') return '';
+    for (const v of (Array.isArray(x) ? x : Object.values(x))) { const f = anyImg(v, (d || 0) + 1); if (f) return f; }
+    return '';
+  }
+  function boardImg(b) {
+    if (b.image_cover_url) return b.image_cover_url;
+    const any = anyImg(b);
+    if (any) return any.replace(/\/(\d+x\d*|originals|\d+x)\//, '/150x150/');
+    const im = b.cover_images || b.images;
+    if (im && typeof im === 'object') { const v = Array.isArray(im) ? im[0] : (im['222x'] || im['170x'] || Object.values(im)[0]); const u = Array.isArray(v) ? v[0] : v; if (u && (u.url || typeof u === 'string')) return u.url || u; }
+    return (b.image_thumbnail_url || b.image_medium_url || '');
+  }
+
   let boards = null;
   async function loadBoards() {
     if (boards) return boards;
     let d;
     if (learn.picker) d = await replay('picker', vItems[vIndex].id);
     else { try { d = await api('BoardPickerBoardsResource', { field_set_key: 'board_picker', filter_all_pins: true, allow_stale: true, sort: 'last_pinned_to', pin_id: vItems[vIndex].id }); } catch (e) { throw new Error(e.message + '.' + HINT); } }
-    boards = (findBoards(d) || []).map((b) => ({ id: String(b.id), name: b.name }));
+    boards = (findBoards(d) || []).map((b) => ({ id: String(b.id), name: b.name, img: boardImg(b) }));
     if (!boards.length) throw new Error('no boards found');
     return boards;
   }
@@ -444,7 +505,7 @@
     const b = ov && ov.querySelector('.like');
     if (!b) return;
     const l = on || likedIds.has(vItems[vIndex].id);
-    b.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 21s-8-5.2-8-11a4.6 4.6 0 0 1 8-3 4.6 4.6 0 0 1 8 3c0 5.800-8 11-8 11z"/></svg>';
+    b.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>';
     b.classList.toggle('on', l);
   }
 
@@ -456,6 +517,35 @@
     } catch (e) { toast('Like refused: ' + e.message); }
   }
 
+  const savedIds = new Set();
+  function setSaved() {
+    const b = ov && ov.querySelector('.save');
+    if (!b) return;
+    const on = savedIds.has(vItems[vIndex].id);
+    b.textContent = on ? 'Saved' : 'Save';
+    b.classList.toggle('done', on);
+  }
+  const pinLink = () => 'https://www.pinterest.com/pin/' + vItems[vIndex].id + '/';
+  function copyText(t, msg) {
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(() => toast(msg), () => toast('Copy blocked'));
+    else toast('Copy blocked');
+  }
+  function openPinPage() { const id = vItems[vIndex].id; closeViewer(); location.assign('/pin/' + id + '/'); }
+  function openMore() {
+    const panel = ov.querySelector('.boards');
+    if (panel.dataset.kind === 'more' && panel.style.display === 'block') { panel.style.display = 'none'; return; }
+    panel.dataset.kind = 'more'; panel.textContent = '';
+    const rows = [['Copy pin link', () => copyText(pinLink(), 'Link copied')],
+      ['Copy image link', () => copyText(vItems[vIndex].src.replace(/\/\d+x\//, '/originals/'), 'Image link copied')],
+      ['Open pin page', openPinPage]];
+    for (const [name, fn] of rows) {
+      const row = document.createElement('div'); row.className = 'board'; row.textContent = name;
+      row.onclick = () => { panel.style.display = 'none'; fn(); };
+      panel.appendChild(row);
+    }
+    panel.style.display = 'block';
+  }
+
   let chosen = null;
   try { chosen = JSON.parse(localStorage.getItem('pwasd-board')); } catch (_) {}
   const showChosen = () => { const b = ov && ov.querySelector('.pick'); if (b) b.textContent = (chosen ? chosen.name : 'Choose board') + ' ▾'; };
@@ -465,28 +555,72 @@
     try {
       if (learn.repin) await replay('repin', vItems[vIndex].id, chosen.id);
       else await api('RepinResource', { board_id: chosen.id, pin_id: vItems[vIndex].id, description: '', title: '', link: '', is_buyable_pin: false, is_removable: false }, true);
-      toast('Saved to ' + chosen.name);
-    } catch (e) { toast('Save refused: ' + e.message); }
+      savedIds.add(vItems[vIndex].id); setSaved(); toast('Saved to ' + chosen.name);
+    } catch (e) {
+      if (/already|duplicate|exist|409|400/i.test(e.message)) { savedIds.add(vItems[vIndex].id); setSaved(); toast('Already added to ' + chosen.name); }
+      else toast('Save refused: ' + e.message);
+    }
   }
 
   async function openBoards() {
     const panel = ov.querySelector('.boards');
-    if (panel.style.display === 'block') { panel.style.display = 'none'; return; }
+    if (panel.dataset.kind === 'boards' && panel.style.display === 'block') { panel.style.display = 'none'; return; }
+    panel.dataset.kind = 'boards';
+    panel.className = 'boards save-dd';
     panel.textContent = 'Loading boards…';
     panel.style.display = 'block';
     try {
       const list = await loadBoards();
       panel.textContent = '';
-      for (const b of list) {
-        const row = document.createElement('div');
-        row.className = 'board'; row.textContent = b.name;
-        row.onclick = () => {
-          chosen = b;
-          try { localStorage.setItem('pwasd-board', JSON.stringify(b)); } catch (_) {}
-          panel.style.display = 'none'; showChosen();
-        };
-        panel.appendChild(row);
-      }
+      const title = document.createElement('div'); title.className = 'dd-title'; title.textContent = 'Save';
+      const sw = document.createElement('div'); sw.className = 'dd-search';
+      const q = document.createElement('input'); q.type = 'text'; q.placeholder = 'Search'; q.spellcheck = false;
+      sw.innerHTML = '<svg viewBox="0 0 24 24"><path d="M10 2a8 8 0 0 1 6.3 12.9l5.4 5.4-1.4 1.4-5.4-5.4A8 8 0 1 1 10 2zm0 2a6 6 0 1 0 0 12 6 6 0 0 0 0-12z"/></svg>';
+      sw.appendChild(q);
+      const body = document.createElement('div'); body.className = 'dd-body';
+      const foot = document.createElement('div'); foot.className = 'dd-create';
+      foot.innerHTML = '<span class="dd-thumb plus"><svg viewBox="0 0 24 24"><path d="M11 4h2v7h7v2h-7v7h-2v-7H4v-2h7z"/></svg></span><b>Create board</b>';
+      panel.append(title, sw, body, foot);
+      const choose = (b) => {
+        chosen = b;
+        try { localStorage.setItem('pwasd-board', JSON.stringify(b)); } catch (_) {}
+        panel.style.display = 'none'; showChosen(); saveToChosen();
+      };
+      const row = (b) => {
+        const r = document.createElement('div'); r.className = 'board';
+        const th = document.createElement('span'); th.className = 'dd-thumb';
+        if (b.img) { const im = document.createElement('img'); im.alt = ''; im.draggable = false; im.decoding = 'async'; im.src = b.img; th.appendChild(im); }
+        const nm = document.createElement('b'); nm.textContent = b.name;
+        r.append(th, nm); r.onclick = () => choose(b);
+        return r;
+      };
+      const label = (t) => { const l = document.createElement('div'); l.className = 'dd-label'; l.textContent = t; return l; };
+      const render = () => {
+        body.textContent = '';
+        const s = q.value.trim().toLowerCase();
+        if (s) {
+          const hit = list.filter((b) => b.name.toLowerCase().includes(s));
+          if (!hit.length) { const n = document.createElement('div'); n.className = 'dd-label'; n.textContent = 'No boards found'; body.appendChild(n); }
+          else hit.forEach((b) => body.appendChild(row(b)));
+          return;
+        }
+        body.appendChild(label('Top choices'));
+        list.slice(0, 2).forEach((b) => body.appendChild(row(b)));
+        body.appendChild(label('All boards'));
+        list.slice().sort((a, b) => a.name.localeCompare(b.name)).forEach((b) => body.appendChild(row(b)));
+      };
+      q.oninput = render;
+      foot.onclick = async () => {
+        const name = q.value.trim() || window.prompt('Board name');
+        if (!name) return;
+        try {
+          const d = await api('BoardResource', { name, description: '', privacy: 'public', category: 'other', layout: 'default', collab_board_email: true, collaborator_invites_enabled: true }, true);
+          if (!d || !d.id) throw new Error('no board id');
+          const b = { id: String(d.id), name: d.name || name, img: '' };
+          boards = null; choose(b);
+        } catch (e) { toast('Could not create board: ' + e.message); }
+      };
+      render(); q.focus();
     } catch (e) { panel.textContent = 'Could not load your boards: ' + e.message; }
   }
 
@@ -498,33 +632,50 @@
     ov = document.createElement('div');
     ov.id = 'pwasd-viewer';
     ov.innerHTML = '<style>'
-      + '#pwasd-viewer{position:fixed;inset:0;z-index:2147483647;background:rgba(8,8,8,.97);overflow-x:hidden;overflow-y:auto;font:15px system-ui,sans-serif;color:#eee;animation:pwasd-in .18s ease;scrollbar-width:thin}'
+      + '#pwasd-viewer{position:fixed;inset:0;z-index:2147483647;background:#080808;overflow-x:hidden;overflow-y:auto;font:15px system-ui,sans-serif;color:#eee;animation:pwasd-in .18s ease;scrollbar-width:thin}'
       + '@keyframes pwasd-in{from{opacity:0}to{opacity:1}}'
       + '#pwasd-viewer .stage{position:relative;height:100vh;overflow:hidden;touch-action:pan-y;user-select:none}'
       + '#pwasd-viewer .slide{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;will-change:transform}'
       + '#pwasd-viewer .slide img{max-width:94vw;max-height:78vh;object-fit:contain;border-radius:12px;box-shadow:0 8px 40px #000a}'
       + '#pwasd-viewer .cap{margin-top:12px;max-width:80vw;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'
       + '#pwasd-viewer .count{position:absolute;top:14px;left:50%;transform:translateX(-50%);font-size:13px;opacity:.7}'
-      + '#pwasd-viewer .acts{position:absolute;top:10px;right:14px;display:flex;gap:8px;z-index:2}'
-      + '#pwasd-viewer .acts{align-items:center;gap:6px}'
-      + '#pwasd-viewer .acts button{font:600 16px system-ui,sans-serif;color:#fff;background:#e60023;border:0;border-radius:24px;padding:12px 18px;cursor:pointer}'
-      + '#pwasd-viewer .acts button:hover{filter:brightness(1.1)}'
-      + '#pwasd-viewer .acts button.like{background:none;padding:8px;display:flex;align-items:center}'
-      + '#pwasd-viewer .acts button.like svg{width:26px;height:26px;fill:none;stroke:#fff;stroke-width:2}'
+      + '#pwasd-viewer .acts{position:absolute;top:12px;right:16px;display:flex;align-items:center;gap:4px;z-index:2}'
+      + '#pwasd-viewer .acts button{font:600 16px/20px system-ui,sans-serif;color:#fff;background:none;border:0;cursor:pointer;height:48px;min-width:48px;border-radius:24px;padding:0;display:flex;align-items:center;justify-content:center}'
+      + '#pwasd-viewer .acts button svg{width:24px;height:24px;fill:#fff}'
+      + '#pwasd-viewer .acts button.like svg{fill:none;stroke:#fff;stroke-width:2}'
       + '#pwasd-viewer .acts button.like.on svg{fill:#e60023;stroke:#e60023}'
-      + '#pwasd-viewer .acts button.mode{background:#333;font-size:13px;padding:8px 12px}'
+      + '#pwasd-viewer .acts button:not(.save):hover{background:rgba(255,255,255,.12)}'
+      + '#pwasd-viewer .acts button.mode{height:36px;min-width:0;background:#2b2b2b;font-size:13px;padding:0 12px;margin-right:8px}'
+      + '#pwasd-viewer .acts button.pick{padding:0 14px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;line-height:48px}'
+      + '#pwasd-viewer .acts button.save{background:#e60023;padding:0 16px;margin-left:4px}'
+      + '#pwasd-viewer .acts button.save:hover{background:#c8001e}'
+      + '#pwasd-viewer .acts button.save.done{background:#2b2b2b}'
       + '#pwasd-viewer .slide video{max-width:94vw;max-height:78vh;border-radius:12px;box-shadow:0 8px 40px #000a;background:#000}'
-      + '#pwasd-viewer .acts button.pick{background:none;color:#fff;padding:8px 10px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}'
       + '#pwasd-viewer .boards{display:none;position:absolute;top:50px;right:14px;z-index:3;width:260px;max-height:60vh;overflow:auto;background:#1c1c1c;border-radius:12px;padding:6px;box-shadow:0 8px 30px #000c}'
       + '#pwasd-viewer .board{padding:9px 12px;border-radius:8px;cursor:pointer}'
       + '#pwasd-viewer .board:hover{background:#333}'
+      + '#pwasd-viewer .save-dd{width:320px;max-height:70vh;padding:0;display:none;flex-direction:column;background:#111;border-radius:24px;overflow:hidden;top:60px;right:16px}'
+      + '#pwasd-viewer .save-dd[style*="block"]{display:flex!important}'
+      + '#pwasd-viewer .dd-title{text-align:center;font-weight:600;font-size:16px;padding:16px 0 12px}'
+      + '#pwasd-viewer .dd-search{display:flex;align-items:center;gap:8px;margin:0 16px 8px;padding:0 12px;height:48px;border:2px solid #4a4a4a;border-radius:16px}'
+      + '#pwasd-viewer .dd-search:focus-within{border-color:#4a7cf0}'
+      + '#pwasd-viewer .dd-search svg{width:16px;height:16px;fill:#fff;flex:none}'
+      + '#pwasd-viewer .dd-search input{flex:1;min-width:0;background:none;border:0;outline:0;color:#fff;font:16px system-ui,sans-serif}'
+      + '#pwasd-viewer .dd-body{flex:1;overflow-y:auto;padding:0 8px;scrollbar-width:thin;min-height:120px}'
+      + '#pwasd-viewer .dd-label{font-size:12px;font-weight:600;padding:12px 8px 6px;color:#ddd}'
+      + '#pwasd-viewer .save-dd .board{display:flex;align-items:center;gap:12px;padding:6px 8px;border-radius:16px}'
+      + '#pwasd-viewer .dd-thumb{width:48px;height:48px;border-radius:12px;background:#2b2b2b;overflow:hidden;flex:none;display:flex;align-items:center;justify-content:center}'
+      + '#pwasd-viewer .dd-thumb img{width:100%;height:100%;object-fit:cover;margin:0;border-radius:0;display:block}'
+      + '#pwasd-viewer .dd-thumb svg{width:24px;height:24px;fill:#fff}'
+      + '#pwasd-viewer .dd-create{display:flex;align-items:center;gap:12px;padding:12px 16px;border-top:1px solid #222;cursor:pointer;background:#111}'
+      + '#pwasd-viewer .dd-create:hover{background:#222}'
       + '#pwasd-viewer .toast{position:absolute;top:56px;left:50%;transform:translateX(-50%);background:#222;padding:8px 16px;border-radius:16px;opacity:0;transition:opacity .2s;z-index:3;pointer-events:none;max-width:80vw;text-align:center}'
       + '#pwasd-viewer .hint{position:absolute;bottom:12px;width:100%;text-align:center;font-size:12px;opacity:.55}'
       + '#pwasd-viewer .grid{display:flex;gap:10px;align-items:flex-start;padding:10px 14px 60px}'
       + '#pwasd-viewer .col{flex:1;min-width:0}'
       + '#pwasd-viewer .grid img{width:100%;display:block;margin-bottom:10px;border-radius:12px;cursor:pointer;background:#222;object-fit:cover}'
       + '</style><div class="stage"><div class="track"></div><div class="count"></div>'
-      + '<div class="acts"><button class="mode" title="What the grid below shows"></button><button class="like" title="Like (L)"></button><button class="pick"></button><button class="save">Save</button></div>'
+      + '<div class="acts"><button class="mode" title="What the grid below shows"></button><button class="like" title="Like (L)"></button><button class="chat" title="Open pin page (comments)"><svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.17L4 17.17V4h16v12z"/></svg></button><button class="share" title="Copy link"><svg viewBox="0 0 24 24"><path d="M19 20H5v-8H3v10h18V12h-2v8zM12 3 7 8l1.4 1.4L11 6.8V16h2V6.8l2.6 2.6L17 8l-5-5z"/></svg></button><button class="more" title="More"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg></button><button class="pick"></button><button class="save">Save</button></div>'
       + '<div class="boards"></div><div class="toast"></div>'
       + '<div class="hint">A / D or arrows or drag: previous / next &nbsp;·&nbsp; scroll down: more pins &nbsp;·&nbsp; wheel on picture: zoom &nbsp;·&nbsp; space: pause video &nbsp;·&nbsp; click picture or Enter: open pin &nbsp;·&nbsp; L: like &nbsp;·&nbsp; Esc: close</div></div>'
       + '<div class="grid"></div>';
@@ -534,6 +685,9 @@
       if (t.closest('.acts, .boards')) {
         if (t.closest('.mode')) { const on = !relMode; try { chrome.storage.local.set({ related: on }); } catch (_) {} setRelMode(on); }
         else if (t.closest('.like')) likePin();
+        else if (t.closest('.chat')) openPinPage();
+        else if (t.closest('.share')) copyText(pinLink(), 'Link copied');
+        else if (t.closest('.more')) openMore();
         else if (t.closest('.pick')) openBoards();
         else if (t.closest('.save')) saveToChosen();
         return;
@@ -583,7 +737,7 @@
     ov.addEventListener('click', (e) => { if (ov.dataset.dragged) { ov.dataset.dragged = ''; e.stopPropagation(); } }, true);
     ov.addEventListener('wheel', onWheel, { passive: false });
     // Near the bottom of the grid, ask for more pins.
-    ov.addEventListener('scroll', () => { if (!gItems && ov.scrollTop + ov.clientHeight > ov.scrollHeight - 1500) wantMore(); }, { passive: true });
+    ov.addEventListener('scroll', () => { if (ov.scrollTop + ov.clientHeight > ov.scrollHeight - 1500) { if (!gItems) wantMore(); else moreRelated(); } }, { passive: true });
     document.documentElement.appendChild(ov);
     showChosen();
     vIndex = i; vSlides = new Map(); vLastGrow = 0; gridCols = []; gridN = 0; gItems = null; lastIdx = -1; Z = { z: 1, x: 0, y: 0 };
@@ -591,6 +745,7 @@
     layout();
     if (relMode) scheduleRelated();
     saveItems();
+    if (!boards) loadBoards().then((l) => { for (const b of l.slice(0, 40)) if (b.img) new Image().src = b.img; }, () => {});
     return true;
   }
 
@@ -659,8 +814,10 @@
   }, true);
 
   window.addEventListener('keydown', (e) => {
+    // typing in any text field (e.g. the Save board search) must never trigger navigation, even inside the viewer
+    if (isTyping(e.target) || isTyping(document.activeElement)) return;
     if (ov) { if (viewerKey(e)) { e.preventDefault(); e.stopImmediatePropagation(); } return; }
-    if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || isTyping(e.target)) return;
+    if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
     const step = PREV_KEYS.has(e.key) ? -1 : NEXT_KEYS.has(e.key) ? 1 : 0;
     if (!step || !pinId()) return;
     if (go(step)) {
